@@ -11,12 +11,12 @@ training:
   batch_size: 256
   updates: 8000
   smoke_updates: 120
-  train_sequence_length: 80
+  train_sequence_length: 200
   learning_rate: 5.0e-4
   grad_clip_norm: 5.0
   eval_every: 400
   smoke_eval_every: 20
-  val_horizon: 500
+  val_horizon: 800
   max_val_windows: 256
   checkpoint_metric: val/VPT80@0.25
   checkpoint_mode: max
@@ -24,7 +24,7 @@ training:
 loss:
   one_step_weight: 1.0
   rollout_weight: 2.0
-  rollout_train_horizon: 50
+  rollout_train_horizon: 80
   rollout_gamma: 0.97
   velocity_weight: 0.05
 
