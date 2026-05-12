@@ -5,7 +5,7 @@ env:
 
 dataset:
   warmup_steps: 10
-  max_horizon: 100
+  max_horizon: 1000
   lqr_gain: [-0.3, -15.0, -0.8, -1.5]
   ar1_rho: 0.9
 
