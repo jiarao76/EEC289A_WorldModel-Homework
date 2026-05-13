@@ -66,7 +66,7 @@ class StudentWorldModel(nn.Module):
         num_layers: int = 3,
         use_gru: bool = True,
         delta_limit: float = 5.0,
-        dropout: float = 0.05,
+        dropout: float = 0.02,
     ) -> None:
         super().__init__()
         self.obs_dim = int(obs_dim)
