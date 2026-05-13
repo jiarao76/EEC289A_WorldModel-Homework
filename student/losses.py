@@ -124,6 +124,7 @@ def early_failure_penalty(
     per_step_nmse = torch.mean(((preds - targets) / obs_std) ** 2, dim=-1)  # (B, H)
 
     penalty = torch.relu(per_step_nmse - threshold)
+    penalty = torch.clamp(penalty, max=2.0)
     return penalty.mean()
 
 
