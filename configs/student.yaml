@@ -8,7 +8,7 @@ model:
   use_gru: true
 
 training:
-  batch_size: 128
+  batch_size: 256
   updates: 15000
   smoke_updates: 120
   train_sequence_length: 400
@@ -27,7 +27,7 @@ loss:
   rollout_train_horizon: 120
   rollout_gamma: 0.98
   velocity_weight: 0.05
-  early_failure_weight: 2.0
+  early_failure_weight: 1.0
 
 eval:
   warmup_steps: 10
