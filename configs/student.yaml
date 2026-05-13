@@ -1,10 +1,10 @@
-seed: 42
+seed: 123
 device: auto
 torch_num_threads: 4
 
 model:
-  hidden_dim: 384
-  num_layers: 5
+  hidden_dim: 512
+  num_layers: 6
   use_gru: true
 
 training:
