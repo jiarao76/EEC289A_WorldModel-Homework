@@ -1,4 +1,5 @@
-"""Student losses — one-step + exponentially-weighted multi-step rollout."""
+"""Student losses — one-step + exponentially-weighted multi-step rollout
+with scheduled sampling support."""
 
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ def rollout_loss(
     warmup_steps: int,
     horizon: int,
     gamma: float = 0.97,
+    teacher_forcing_ratio: float = 0.0,
 ) -> torch.Tensor:
     needed_states = int(warmup_steps) + int(horizon) + 1
     if states.shape[1] < needed_states:
@@ -48,6 +50,7 @@ def rollout_loss(
     preds = open_loop_rollout(
         model, sub_states, sub_actions, normalizer,
         warmup_steps=warmup_steps, horizon=horizon,
+        teacher_forcing_ratio=teacher_forcing_ratio,
     )
     targets = sub_states[:, warmup_steps + 1 : warmup_steps + 1 + horizon]
 
@@ -104,7 +107,6 @@ def early_failure_penalty(
     check_horizon: int = 20,
     threshold: float = 0.25,
 ) -> torch.Tensor:
-    """专门惩罚前check_horizon步内误差超过阈值的预测，直接针对VPT80@0.25。"""
     needed_states = int(warmup_steps) + int(check_horizon) + 1
     if states.shape[1] < needed_states:
         return torch.tensor(0.0, device=states.device)
@@ -121,14 +123,15 @@ def early_failure_penalty(
     targets = sub_states[:, warmup_steps + 1 : warmup_steps + 1 + check_horizon]
 
     obs_std = torch.as_tensor(normalizer.obs_std, dtype=preds.dtype, device=preds.device)
-    per_step_nmse = torch.mean(((preds - targets) / obs_std) ** 2, dim=-1)  # (B, H)
+    per_step_nmse = torch.mean(((preds - targets) / obs_std) ** 2, dim=-1)
 
     penalty = torch.relu(per_step_nmse - threshold)
     penalty = torch.clamp(penalty, max=2.0)
     return penalty.mean()
 
 
-def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
+def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict,
+                 update: int = 0, total_updates: int = 20000):
     loss_cfg = cfg["loss"]
     states = batch["states"]
     actions = batch["actions"]
@@ -139,9 +142,19 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
     warmup = int(cfg["eval"].get("warmup_steps", 10))
     gamma = float(loss_cfg.get("rollout_gamma", 0.97))
 
+    # Scheduled sampling: linearly decay teacher forcing ratio
+    # from initial value to 0 over the first half of training
+    tf_initial = float(loss_cfg.get("teacher_forcing_initial", 0.3))
+    tf_decay_end = int(total_updates * 0.5)
+    if update < tf_decay_end:
+        teacher_forcing_ratio = tf_initial * (1.0 - update / tf_decay_end)
+    else:
+        teacher_forcing_ratio = 0.0
+
     roll = rollout_loss(
         model, states, actions, normalizer,
         warmup_steps=warmup, horizon=horizon, gamma=gamma,
+        teacher_forcing_ratio=teacher_forcing_ratio,
     )
 
     early_w = float(loss_cfg.get("early_failure_weight", 0.0))
@@ -167,9 +180,10 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
 
     total = one_w * one + roll_w * roll + vel_w * vel + early_w * early
     return total, {
-        "loss/total":         float(total.detach().cpu()),
-        "loss/one_step":      float(one.detach().cpu()),
-        "loss/rollout":       float(roll.detach().cpu()),
-        "loss/velocity":      float(vel.detach().cpu()),
-        "loss/early_penalty": float(early.detach().cpu()),
+        "loss/total":            float(total.detach().cpu()),
+        "loss/one_step":         float(one.detach().cpu()),
+        "loss/rollout":          float(roll.detach().cpu()),
+        "loss/velocity":         float(vel.detach().cpu()),
+        "loss/early_penalty":    float(early.detach().cpu()),
+        "train/teacher_forcing": teacher_forcing_ratio,
     }
