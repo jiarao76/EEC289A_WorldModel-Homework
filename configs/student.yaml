@@ -1,4 +1,4 @@
-seed: 123
+seed: 42
 device: auto
 torch_num_threads: 4
 
@@ -28,7 +28,6 @@ loss:
   rollout_gamma: 0.98
   velocity_weight: 0.05
   early_failure_weight: 1.5
-  teacher_forcing_initial: 0.3
 
 eval:
   warmup_steps: 10
