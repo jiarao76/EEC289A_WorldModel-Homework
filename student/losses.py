@@ -130,8 +130,7 @@ def early_failure_penalty(
     return penalty.mean()
 
 
-def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict,
-                 update: int = 0, total_updates: int = 20000):
+def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
     loss_cfg = cfg["loss"]
     states = batch["states"]
     actions = batch["actions"]
@@ -141,15 +140,7 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict,
     horizon = int(loss_cfg.get("rollout_train_horizon", 20))
     warmup = int(cfg["eval"].get("warmup_steps", 10))
     gamma = float(loss_cfg.get("rollout_gamma", 0.97))
-
-    # Scheduled sampling: linearly decay teacher forcing ratio
-    # from initial value to 0 over the first half of training
-    tf_initial = float(loss_cfg.get("teacher_forcing_initial", 0.3))
-    tf_decay_end = int(total_updates * 0.5)
-    if update < tf_decay_end:
-        teacher_forcing_ratio = tf_initial * (1.0 - update / tf_decay_end)
-    else:
-        teacher_forcing_ratio = 0.0
+    teacher_forcing_ratio = float(loss_cfg.get("teacher_forcing_initial", 0.0))
 
     roll = rollout_loss(
         model, states, actions, normalizer,
