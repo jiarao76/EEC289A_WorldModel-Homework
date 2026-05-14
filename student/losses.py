@@ -1,5 +1,4 @@
-"""Student losses — one-step + exponentially-weighted multi-step rollout
-with scheduled sampling support."""
+"""Student losses — one-step + exponentially-weighted multi-step rollout."""
 
 from __future__ import annotations
 
@@ -34,7 +33,6 @@ def rollout_loss(
     warmup_steps: int,
     horizon: int,
     gamma: float = 0.97,
-    teacher_forcing_ratio: float = 0.0,
 ) -> torch.Tensor:
     needed_states = int(warmup_steps) + int(horizon) + 1
     if states.shape[1] < needed_states:
@@ -50,7 +48,6 @@ def rollout_loss(
     preds = open_loop_rollout(
         model, sub_states, sub_actions, normalizer,
         warmup_steps=warmup_steps, horizon=horizon,
-        teacher_forcing_ratio=teacher_forcing_ratio,
     )
     targets = sub_states[:, warmup_steps + 1 : warmup_steps + 1 + horizon]
 
@@ -140,12 +137,10 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
     horizon = int(loss_cfg.get("rollout_train_horizon", 20))
     warmup = int(cfg["eval"].get("warmup_steps", 10))
     gamma = float(loss_cfg.get("rollout_gamma", 0.97))
-    teacher_forcing_ratio = float(loss_cfg.get("teacher_forcing_initial", 0.0))
 
     roll = rollout_loss(
         model, states, actions, normalizer,
         warmup_steps=warmup, horizon=horizon, gamma=gamma,
-        teacher_forcing_ratio=teacher_forcing_ratio,
     )
 
     early_w = float(loss_cfg.get("early_failure_weight", 0.0))
@@ -171,10 +166,9 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
 
     total = one_w * one + roll_w * roll + vel_w * vel + early_w * early
     return total, {
-        "loss/total":            float(total.detach().cpu()),
-        "loss/one_step":         float(one.detach().cpu()),
-        "loss/rollout":          float(roll.detach().cpu()),
-        "loss/velocity":         float(vel.detach().cpu()),
-        "loss/early_penalty":    float(early.detach().cpu()),
-        "train/teacher_forcing": teacher_forcing_ratio,
+        "loss/total":         float(total.detach().cpu()),
+        "loss/one_step":      float(one.detach().cpu()),
+        "loss/rollout":       float(roll.detach().cpu()),
+        "loss/velocity":      float(vel.detach().cpu()),
+        "loss/early_penalty": float(early.detach().cpu()),
     }
