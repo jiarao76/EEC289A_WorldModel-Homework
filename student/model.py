@@ -165,7 +165,7 @@ class StudentWorldModel(nn.Module):
         """
         if hidden is None:
             hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
-        h, z_prev = hidden
+        h, z_prev = hidden[0], hidden[1]
 
         # Encode (obs, action)
         x    = torch.cat([obs_norm, act_norm], dim=-1)
