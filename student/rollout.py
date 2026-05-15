@@ -22,13 +22,13 @@ def open_loop_rollout(
         obs_norm = normalizer.normalize_obs(states[:, t])
         act_norm = normalizer.normalize_act(actions[:, t])
         _, hidden = model(obs_norm, act_norm, hidden)
-        # Keep only (h, z) for next step
-        hidden = (hidden[0], hidden[1])
+        # Keep only (h, z) if hidden is a tuple with more than 2 elements
+        if isinstance(hidden, tuple) and len(hidden) > 2:
+            hidden = (hidden[0], hidden[1])
 
     cur = states[:, int(warmup_steps)]
     preds = []
 
-    # Open-loop: use prior if available, else fallback to forward()
     use_prior = hasattr(model, 'predict')
 
     for h in range(int(horizon)):
@@ -39,11 +39,4 @@ def open_loop_rollout(
         if use_prior:
             delta_norm, hidden = model.predict(obs_norm, act_norm, hidden)
         else:
-            delta_norm, hidden = model(obs_norm, act_norm, hidden)
-            hidden = (hidden[0], hidden[1]) if isinstance(hidden, tuple) else hidden
-
-        delta = normalizer.unnormalize_delta(delta_norm)
-        cur = cur + delta
-        preds.append(cur)
-
-    return torch.stack(preds, dim=1)
+            delta_
