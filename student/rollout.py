@@ -28,8 +28,24 @@ def open_loop_rollout(
 
     cur = states[:, int(warmup_steps)]
     preds = []
-    use_prior = hasattr(model, 'predict')
+
+    # Use predict() for RSSM prior path, fallback to forward() otherwise
+    predict_fn = getattr(model, 'predict', None)
 
     for step in range(int(horizon)):
         obs_norm = normalizer.normalize_obs(cur)
-        act_norm
+        act_norm = normalizer.normalize_act(
+            actions[:, int(warmup_steps) + step]
+        )
+        if predict_fn is not None:
+            delta_norm, hidden = predict_fn(obs_norm, act_norm, hidden)
+        else:
+            delta_norm, hidden = model(obs_norm, act_norm, hidden)
+            if isinstance(hidden, tuple) and len(hidden) > 2:
+                hidden = (hidden[0], hidden[1])
+
+        delta = normalizer.denormalize_delta(delta_norm)
+        cur = cur + delta
+        preds.append(cur)
+
+    return torch.stack(preds, dim=1)
