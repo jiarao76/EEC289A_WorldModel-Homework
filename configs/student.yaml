@@ -28,6 +28,7 @@ loss:
   rollout_gamma: 0.98
   velocity_weight: 0.05
   early_failure_weight: 1.5
+  kl_weight: 0.1
 
 eval:
   warmup_steps: 10
