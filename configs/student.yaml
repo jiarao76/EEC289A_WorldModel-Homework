@@ -13,7 +13,7 @@ training:
   smoke_updates: 120
   train_sequence_length: 400
   learning_rate: 2.0e-4
-  grad_clip_norm: 2.0
+  grad_clip_norm: 1.0        # lowered from 2.0 — essential for long rollout stability
   eval_every: 500
   smoke_eval_every: 20
   val_horizon: 800
@@ -22,13 +22,22 @@ training:
   checkpoint_mode: max
 
 loss:
-  one_step_weight: 1.0
-  rollout_weight: 3.0
-  rollout_train_horizon: 120
-  rollout_gamma: 0.98
-  velocity_weight: 0.05
-  early_failure_weight: 1.5
-  kl_weight: 0.1
+  # One-step: already near-perfect at 1500 steps, reduce its weight
+  one_step_weight: 0.5       # down from 1.0
+
+  # KL: raised to prevent collapse; free_bits=1.0 is hard-coded in model._kl()
+  kl_weight: 0.5             # up from 0.1
+
+  # Rollout: the main lever for long-horizon VPT
+  rollout_weight: 8.0        # up from 3.0 — long-horizon accuracy is the goal
+  rollout_train_horizon: 200 # up from 120 — gradients must reach step 200+
+  rollout_gamma: 1.0         # UNIFORM weights — every step equally important
+                             # (0.98^200 = 0.018, meaning step 200 got ~2%
+                             # of step-1 gradient; now it gets 100%)
+
+  # Auxiliary losses
+  early_failure_weight: 2.0  # up from 1.5 — penalise early divergence harder
+  velocity_weight: 0.05      # unchanged
 
 eval:
   warmup_steps: 10
