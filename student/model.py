@@ -5,9 +5,15 @@ Architecture
 * Deterministic path: GRUCell captures temporal history.
 * Stochastic path: learned prior p(z|h) and posterior q(z|h,o).
 * At training time, posterior samples z from (h, obs) via reparameterization.
-* At prediction time, prior samples z from h only — no ground-truth obs needed.
-* KL divergence between posterior and prior is minimized during training.
+* At prediction time, prior uses MEAN (no sampling) for deterministic rollout.
+* KL divergence with free-bits between posterior and prior minimized during training.
 * Decoder predicts obs delta from (h, z).
+
+Key fixes vs original:
+  1. predict() uses prior_mean instead of sampling — eliminates stochastic noise
+     accumulation over long horizons, critical for VPT > 100.
+  2. _kl() uses free_bits clamp — prevents KL collapse (posterior == prior),
+     keeps stochastic latent z meaningful throughout training.
 """
 
 from __future__ import annotations
@@ -96,7 +102,6 @@ class StudentWorldModel(nn.Module):
         )
 
         # ── 5. Posterior q(z | h, o): uses h + encoded obs ───────────────
-        # Encodes obs separately to compute posterior
         self.obs_encoder = nn.Sequential(
             nn.Linear(obs_dim, D // 2),
             nn.SiLU(),
@@ -137,8 +142,15 @@ class StudentWorldModel(nn.Module):
         eps = torch.randn_like(std)
         return mean + std * eps
 
-    def _kl(self, post_mean, post_log_std, prior_mean, prior_log_std):
-        """KL(posterior || prior) in closed form."""
+    def _kl(self, post_mean, post_log_std, prior_mean, prior_log_std,
+            free_bits: float = 1.0):
+        """KL(posterior || prior) with free-bits floor.
+
+        free_bits prevents KL collapse: if KL < free_bits nats the gradient
+        is zeroed out, so the posterior is never forced all the way to the
+        prior.  Value of 1.0 nat keeps the latent z informative without
+        over-regularising.
+        """
         post_var  = torch.exp(2 * post_log_std)
         prior_var = torch.exp(2 * prior_log_std)
         kl = (
@@ -146,7 +158,9 @@ class StudentWorldModel(nn.Module):
             + (post_var + (post_mean - prior_mean) ** 2) / (2 * prior_var)
             - 0.5
         )
-        return kl.sum(dim=-1).mean()
+        # Sum over latent dims, then apply free-bits floor per sample
+        kl_per_sample = kl.sum(dim=-1)              # (B,)
+        return torch.clamp(kl_per_sample, min=free_bits).mean()
 
     # ── Forward (training mode: uses posterior) ───────────────────────────
 
@@ -161,43 +175,40 @@ class StudentWorldModel(nn.Module):
         Returns
         -------
         delta_norm : (B, obs_dim) predicted delta in normalised space.
-        hidden     : updated (h, z) tuple.
+        hidden     : updated 6-tuple (h, z, prior_mean, prior_log_std,
+                     post_mean, post_log_std) for loss extraction.
         """
         if hidden is None:
             hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
         h, z_prev = hidden[0], hidden[1]
 
-        # Encode (obs, action)
         x    = torch.cat([obs_norm, act_norm], dim=-1)
         feat = self.res_blocks(self.input_proj(x))
 
-        # GRU update: input = encoded features + previous z
         h_new = self.gru(torch.cat([feat, z_prev], dim=-1), h)
 
         # Prior p(z | h_new)
-        prior_raw               = self.prior_net(h_new)
+        prior_raw                 = self.prior_net(h_new)
         prior_mean, prior_log_std = self._dist_params(prior_raw)
 
         # Posterior q(z | h_new, obs)
-        obs_feat                    = self.obs_encoder(obs_norm)
-        post_raw                    = self.posterior_net(
+        obs_feat                  = self.obs_encoder(obs_norm)
+        post_raw                  = self.posterior_net(
             torch.cat([h_new, obs_feat], dim=-1)
         )
-        post_mean, post_log_std     = self._dist_params(post_raw)
+        post_mean, post_log_std   = self._dist_params(post_raw)
 
         # Sample z from posterior (reparameterisation)
         z_new = self._sample(post_mean, post_log_std)
 
-        # Decode
         raw_delta  = self.head(torch.cat([h_new, z_new], dim=-1))
         delta_norm = self.delta_limit * torch.tanh(raw_delta / self.delta_limit)
 
-        # Pack extra info needed by loss into hidden tuple
         hidden_new = (h_new, z_new, prior_mean, prior_log_std,
                       post_mean, post_log_std)
         return delta_norm, hidden_new
 
-    # ── Predict (inference mode: uses prior only) ─────────────────────────
+    # ── Predict (inference mode: uses prior MEAN — no sampling) ──────────
 
     def predict(
         self,
@@ -205,17 +216,23 @@ class StudentWorldModel(nn.Module):
         act_norm: torch.Tensor,
         hidden=None,
     ):
-        """One-step prediction using prior only (open-loop inference).
+        """One-step prediction using prior mean (open-loop inference).
+
+        CRITICAL: uses prior_mean directly instead of sampling.
+        Sampling adds independent Gaussian noise at every step; over 1000
+        steps this accumulates into large trajectory drift that pushes
+        nMSE above the 0.25 threshold and kills VPT.  Using the mean
+        gives a fully deterministic rollout whose error grows only due to
+        model bias, not added variance.
 
         Returns
         -------
         delta_norm : (B, obs_dim) predicted delta.
-        hidden     : updated (h, z) tuple (compact, no dist params).
+        hidden     : updated compact (h, z) tuple.
         """
         if hidden is None:
             hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
 
-        # Support both compact (h, z) and full training tuple
         h, z_prev = hidden[0], hidden[1]
 
         x    = torch.cat([obs_norm, act_norm], dim=-1)
@@ -223,10 +240,11 @@ class StudentWorldModel(nn.Module):
 
         h_new = self.gru(torch.cat([feat, z_prev], dim=-1), h)
 
-        # Prior only — no obs needed
         prior_raw             = self.prior_net(h_new)
-        prior_mean, prior_log_std = self._dist_params(prior_raw)
-        z_new                 = self._sample(prior_mean, prior_log_std)
+        prior_mean, _         = self._dist_params(prior_raw)
+
+        # ── KEY FIX: use mean, not a random sample ────────────────────────
+        z_new = prior_mean
 
         raw_delta  = self.head(torch.cat([h_new, z_new], dim=-1))
         delta_norm = self.delta_limit * torch.tanh(raw_delta / self.delta_limit)
