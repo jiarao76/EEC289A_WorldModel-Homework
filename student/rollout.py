@@ -22,21 +22,14 @@ def open_loop_rollout(
         obs_norm = normalizer.normalize_obs(states[:, t])
         act_norm = normalizer.normalize_act(actions[:, t])
         _, hidden = model(obs_norm, act_norm, hidden)
-        # Keep only (h, z) if hidden is a tuple with more than 2 elements
+        # Compact hidden to (h, z) if RSSM returns full 6-tuple
         if isinstance(hidden, tuple) and len(hidden) > 2:
             hidden = (hidden[0], hidden[1])
 
     cur = states[:, int(warmup_steps)]
     preds = []
-
     use_prior = hasattr(model, 'predict')
 
-    for h in range(int(horizon)):
+    for step in range(int(horizon)):
         obs_norm = normalizer.normalize_obs(cur)
-        act_norm = normalizer.normalize_act(
-            actions[:, int(warmup_steps) + h]
-        )
-        if use_prior:
-            delta_norm, hidden = model.predict(obs_norm, act_norm, hidden)
-        else:
-            delta_
+        act_norm
