@@ -1,11 +1,8 @@
-"""Student one-step + multi-scale rollout loss with Scheduled Sampling.
+"""Student losses with internal step counter for Scheduled Sampling.
 
-Key improvements:
-1. Scheduled Sampling: teacher_forcing_ratio anneals from `ss_start` to 0
-   over the first `ss_anneal_steps` updates. Early training uses ground-truth
-   states to stabilise gradients; late training uses pure open-loop rollout.
-2. Multi-scale rollout at 4 anchors (10, H//4, H//2, H).
-3. Late-step emphasis: steps near the end of each rollout get 2x weight.
+Since train.py is locked and does not pass `step` to compute_loss, we use
+a module-level counter that increments on every compute_loss call.
+This gives SS a reliable clock without modifying the locked training script.
 """
 
 from __future__ import annotations
@@ -14,6 +11,24 @@ import torch
 import torch.nn.functional as F
 
 from .rollout import open_loop_rollout
+
+# ---------------------------------------------------------------------------
+# Internal step counter (replaces the missing `step` argument from train.py)
+# ---------------------------------------------------------------------------
+_CALL_COUNT = 0
+
+
+def _get_and_increment() -> int:
+    global _CALL_COUNT
+    c = _CALL_COUNT
+    _CALL_COUNT += 1
+    return c
+
+
+def reset_counter():
+    """Call this at the start of training if you want reproducible SS."""
+    global _CALL_COUNT
+    _CALL_COUNT = 0
 
 
 # ---------------------------------------------------------------------------
@@ -50,22 +65,20 @@ def _single_rollout_loss(
     max_start = states.shape[1] - needed
     start = int(torch.randint(0, max_start + 1, (), device=states.device).item()) if max_start > 0 else 0
 
-    sub_states = states[:, start : start + needed]
+    sub_states  = states[:, start : start + needed]
     sub_actions = actions[:, start : start + int(warmup_steps) + int(horizon)]
 
     preds = open_loop_rollout(
         model, sub_states, sub_actions, normalizer,
         warmup_steps=warmup_steps, horizon=horizon,
         teacher_forcing_ratio=teacher_forcing_ratio,
-    )  # [B, horizon, obs_dim]
+    )
     targets = sub_states[:, warmup_steps + 1 : warmup_steps + 1 + horizon]
 
     pred_norm   = normalizer.normalize_obs(preds)
     target_norm = normalizer.normalize_obs(targets)
+    step_se = ((pred_norm - target_norm) ** 2).mean(dim=-1)
 
-    step_se = ((pred_norm - target_norm) ** 2).mean(dim=-1)  # [B, horizon]
-
-    # Linear ramp: later steps get up to late_step_weight x more loss weight
     h = step_se.shape[1]
     if h > 1:
         ramp = torch.linspace(1.0, float(late_step_weight), h, device=step_se.device)
@@ -83,11 +96,6 @@ def rollout_loss(
     horizon: int,
     teacher_forcing_ratio: float = 0.0,
 ) -> torch.Tensor:
-    """Multi-scale rollout loss at up to 4 anchors: 10, H//4, H//2, H.
-
-    All anchors are clamped to [1, horizon] so the function is safe even
-    when horizon is small (e.g. during unit tests with short sequences).
-    """
     def clamp(h: int) -> int:
         return max(1, min(int(h), horizon))
 
@@ -102,7 +110,7 @@ def rollout_loss(
 
 
 # ---------------------------------------------------------------------------
-# Public API expected by train.py
+# Public API
 # ---------------------------------------------------------------------------
 
 def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict, *, step: int = 0, total_steps: int = 0):
@@ -110,16 +118,19 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict, *
     states  = batch["states"]
     actions = batch["actions"]
 
+    # Use internal counter as clock since train.py doesn't pass step
+    call_step = _get_and_increment()
+
     one = one_step_delta_loss(model, states, actions, normalizer)
 
     horizon = int(loss_cfg.get("rollout_train_horizon", 15))
     warmup  = int(cfg["eval"].get("warmup_steps", 10))
 
-    # Scheduled Sampling: anneal teacher_forcing_ratio from ss_start → 0
+    # Scheduled Sampling anneal
     ss_start        = float(loss_cfg.get("ss_start", 0.5))
     ss_anneal_steps = int(loss_cfg.get("ss_anneal_steps", 3000))
-    if ss_anneal_steps > 0 and step > 0:
-        frac = min(1.0, step / ss_anneal_steps)
+    if ss_anneal_steps > 0:
+        frac = min(1.0, call_step / ss_anneal_steps)
         teacher_forcing_ratio = ss_start * (1.0 - frac)
     else:
         teacher_forcing_ratio = 0.0
@@ -131,13 +142,13 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict, *
     )
 
     one_w  = float(loss_cfg.get("one_step_weight", 1.0))
-    roll_w = float(loss_cfg.get("rollout_weight",  1.0))
+    roll_w = float(loss_cfg.get("rollout_weight", 1.0))
     total  = one_w * one + roll_w * roll
 
     return total, {
-        "loss/total":              float(total.detach().cpu()),
-        "loss/one_step":           float(one.detach().cpu()),
-        "loss/rollout":            float(roll.detach().cpu()),
-        "loss/rollout_horizon":    float(horizon),
-        "loss/teacher_forcing":    float(teacher_forcing_ratio),
+        "loss/total":           float(total.detach().cpu()),
+        "loss/one_step":        float(one.detach().cpu()),
+        "loss/rollout":         float(roll.detach().cpu()),
+        "loss/rollout_horizon": float(horizon),
+        "loss/teacher_forcing": float(teacher_forcing_ratio),
     }
