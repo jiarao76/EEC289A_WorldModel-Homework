@@ -90,15 +90,17 @@ def rollout_loss(
     warmup_steps: int,
     horizon: int,
 ) -> torch.Tensor:
-    """Multi-scale rollout loss at 4 anchors: 10, H//4, H//2, H.
+    """Multi-scale rollout loss at up to 4 anchors: 10, H//4, H//2, H.
 
     With horizon=400 this gives 10, 100, 200, 400 — directly covering
     the critical long-range stability range.
+    All anchors are clamped to [1, horizon] so the function is safe even
+    when horizon is small (e.g. during unit tests with short sequences).
     """
-    short = min(10, horizon)
-    q1    = max(short + 1, horizon // 4)
-    mid   = max(q1 + 1,   horizon // 2)
-    scales = sorted({short, q1, mid, horizon})
+    def clamp(h: int) -> int:
+        return max(1, min(int(h), horizon))
+
+    scales = sorted({clamp(10), clamp(horizon // 4), clamp(horizon // 2), horizon})
     losses = []
     for h in scales:
         losses.append(_single_rollout_loss(model, states, actions, normalizer, warmup_steps, h))
