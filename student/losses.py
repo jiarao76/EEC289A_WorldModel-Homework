@@ -1,14 +1,11 @@
-"""Student one-step + multi-scale rollout loss with curriculum learning.
+"""Student one-step + multi-scale rollout loss with Scheduled Sampling.
 
-Key improvements over the starter:
-1. Multi-scale rollout: simultaneously train at short (H/4), medium (H/2),
-   and full (H) horizons so the model learns both local accuracy and long-range
-   stability.
-2. Late-step emphasis: within each rollout loss the per-step MSE is weighted
-   by its position (later steps get higher weight), directly penalising drift.
-3. Curriculum warmup: rollout_train_horizon ramps from 5 to the configured max
-   over the first half of training, preventing gradient explosion early on.
-   When the training loop does not pass a global step, the full horizon is used.
+Key improvements:
+1. Scheduled Sampling: teacher_forcing_ratio anneals from `ss_start` to 0
+   over the first `ss_anneal_steps` updates. Early training uses ground-truth
+   states to stabilise gradients; late training uses pure open-loop rollout.
+2. Multi-scale rollout at 4 anchors (10, H//4, H//2, H).
+3. Late-step emphasis: steps near the end of each rollout get 2x weight.
 """
 
 from __future__ import annotations
@@ -41,14 +38,9 @@ def _single_rollout_loss(
     normalizer,
     warmup_steps: int,
     horizon: int,
-    *,
+    teacher_forcing_ratio: float = 0.0,
     late_step_weight: float = 2.0,
 ) -> torch.Tensor:
-    """MSE in normalised obs space over `horizon` open-loop steps.
-
-    Steps closer to the end receive up to `late_step_weight` × more loss
-    weight, focusing optimisation on long-horizon stability.
-    """
     needed = int(warmup_steps) + int(horizon) + 1
     if states.shape[1] < needed:
         raise ValueError(
@@ -64,16 +56,16 @@ def _single_rollout_loss(
     preds = open_loop_rollout(
         model, sub_states, sub_actions, normalizer,
         warmup_steps=warmup_steps, horizon=horizon,
+        teacher_forcing_ratio=teacher_forcing_ratio,
     )  # [B, horizon, obs_dim]
     targets = sub_states[:, warmup_steps + 1 : warmup_steps + 1 + horizon]
 
-    pred_norm = normalizer.normalize_obs(preds)
+    pred_norm   = normalizer.normalize_obs(preds)
     target_norm = normalizer.normalize_obs(targets)
 
-    # Per-step squared error: [B, horizon, obs_dim] -> [B, horizon]
-    step_se = ((pred_norm - target_norm) ** 2).mean(dim=-1)
+    step_se = ((pred_norm - target_norm) ** 2).mean(dim=-1)  # [B, horizon]
 
-    # Linear ramp: weight_t = 1 + (late_step_weight - 1) * t / (horizon - 1)
+    # Linear ramp: later steps get up to late_step_weight x more loss weight
     h = step_se.shape[1]
     if h > 1:
         ramp = torch.linspace(1.0, float(late_step_weight), h, device=step_se.device)
@@ -89,11 +81,10 @@ def rollout_loss(
     normalizer,
     warmup_steps: int,
     horizon: int,
+    teacher_forcing_ratio: float = 0.0,
 ) -> torch.Tensor:
     """Multi-scale rollout loss at up to 4 anchors: 10, H//4, H//2, H.
 
-    With horizon=400 this gives 10, 100, 200, 400 — directly covering
-    the critical long-range stability range.
     All anchors are clamped to [1, horizon] so the function is safe even
     when horizon is small (e.g. during unit tests with short sequences).
     """
@@ -103,7 +94,10 @@ def rollout_loss(
     scales = sorted({clamp(10), clamp(horizon // 4), clamp(horizon // 2), horizon})
     losses = []
     for h in scales:
-        losses.append(_single_rollout_loss(model, states, actions, normalizer, warmup_steps, h))
+        losses.append(_single_rollout_loss(
+            model, states, actions, normalizer, warmup_steps, h,
+            teacher_forcing_ratio=teacher_forcing_ratio,
+        ))
     return torch.stack(losses).mean()
 
 
@@ -113,30 +107,37 @@ def rollout_loss(
 
 def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict, *, step: int = 0, total_steps: int = 0):
     loss_cfg = cfg["loss"]
-    states = batch["states"]
+    states  = batch["states"]
     actions = batch["actions"]
 
     one = one_step_delta_loss(model, states, actions, normalizer)
 
-    max_horizon = int(loss_cfg.get("rollout_train_horizon", 15))
-    warmup = int(cfg["eval"].get("warmup_steps", 10))
+    horizon = int(loss_cfg.get("rollout_train_horizon", 15))
+    warmup  = int(cfg["eval"].get("warmup_steps", 10))
 
-    # Curriculum: ramp horizon from 5 → max_horizon over first 40 % of training
-    if total_steps > 0:
-        frac = min(1.0, step / max(1, int(total_steps * 0.4)))
-        horizon = max(5, int(5 + (max_horizon - 5) * frac))
+    # Scheduled Sampling: anneal teacher_forcing_ratio from ss_start → 0
+    ss_start        = float(loss_cfg.get("ss_start", 0.5))
+    ss_anneal_steps = int(loss_cfg.get("ss_anneal_steps", 3000))
+    if ss_anneal_steps > 0 and step > 0:
+        frac = min(1.0, step / ss_anneal_steps)
+        teacher_forcing_ratio = ss_start * (1.0 - frac)
     else:
-        horizon = max_horizon
+        teacher_forcing_ratio = 0.0
 
-    roll = rollout_loss(model, states, actions, normalizer, warmup_steps=warmup, horizon=horizon)
+    roll = rollout_loss(
+        model, states, actions, normalizer,
+        warmup_steps=warmup, horizon=horizon,
+        teacher_forcing_ratio=teacher_forcing_ratio,
+    )
 
-    one_w = float(loss_cfg.get("one_step_weight", 1.0))
-    roll_w = float(loss_cfg.get("rollout_weight", 1.0))
-    total = one_w * one + roll_w * roll
+    one_w  = float(loss_cfg.get("one_step_weight", 1.0))
+    roll_w = float(loss_cfg.get("rollout_weight",  1.0))
+    total  = one_w * one + roll_w * roll
 
     return total, {
-        "loss/total": float(total.detach().cpu()),
-        "loss/one_step": float(one.detach().cpu()),
-        "loss/rollout": float(roll.detach().cpu()),
-        "loss/rollout_horizon": float(horizon),
+        "loss/total":              float(total.detach().cpu()),
+        "loss/one_step":           float(one.detach().cpu()),
+        "loss/rollout":            float(roll.detach().cpu()),
+        "loss/rollout_horizon":    float(horizon),
+        "loss/teacher_forcing":    float(teacher_forcing_ratio),
     }
