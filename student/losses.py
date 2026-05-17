@@ -41,7 +41,7 @@ def one_step_delta_loss(model, states, actions, normalizer):
             _, _, prior_mean, prior_log_std, post_mean, post_log_std = hidden
             kl = model._kl(post_mean, post_log_std,
                            prior_mean, prior_log_std,
-                           free_bits=1.0)
+                           free_bits=0.0)
             total_kl += kl
 
         # Detach hidden between steps to limit BPTT length,
