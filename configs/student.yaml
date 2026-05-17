@@ -12,7 +12,7 @@ training:
   batch_size: 256
   updates: 8000
   smoke_updates: 120
-  train_sequence_length: 256   # warmup(10) + rollout_horizon(200) + 1 = 211
+  train_sequence_length: 256
   learning_rate: 3.0e-4
   grad_clip_norm: 5.0
   eval_every: 400
@@ -26,10 +26,10 @@ loss:
   one_step_weight: 1.0
   rollout_weight: 3.0
   rollout_train_horizon: 200
-  # Scheduled Sampling: teacher_forcing_ratio anneals from 0.8 → 0 over 4000 steps
-  # Early training uses 80% ground-truth states → stable gradients
-  # Late training uses pure open-loop → model learns to handle its own errors
-  ss_start: 0.8
+  # SS anneals teacher_forcing from 0.9 -> 0 over first 4000 steps
+  # Early: 90% ground truth states -> stable gradients, good single-step learning
+  # Late:  pure open-loop -> long-horizon robustness
+  ss_start: 0.9
   ss_anneal_steps: 4000
 
 eval:
