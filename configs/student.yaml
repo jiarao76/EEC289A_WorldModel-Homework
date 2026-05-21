@@ -3,30 +3,30 @@ device: auto
 torch_num_threads: 1
 
 model:
-  hidden_dim: 256      # wider than starter (128 → 256)
-  num_layers: 3        # more residual blocks (2 → 3)
-  use_gru: true        # enable GRU for temporal memory
+  hidden_dim: 256
+  num_layers: 3
+  use_gru: true
 
 training:
   batch_size: 128
-  updates: 5000         # more training steps (2000 → 5000)
+  updates: 8000
   smoke_updates: 120
-  train_sequence_length: 96   # longer context window (64 → 96) to cover warmup+horizon
-  learning_rate: 3.0e-4       # lower LR for stability with GRU (1e-3 → 3e-4)
-  grad_clip_norm: 5.0          # tighter clipping for GRU (10.0 → 5.0)
+  train_sequence_length: 192   # warmup(10) + horizon(150) + margin(32)
+  learning_rate: 3.0e-4
+  grad_clip_norm: 5.0
   eval_every: 500
   smoke_eval_every: 20
-  val_horizon: 500             # evaluate longer horizon during training
+  val_horizon: 500
   max_val_windows: 128
   checkpoint_metric: val/VPT80@0.25
   checkpoint_mode: max
 
 loss:
-  one_step_weight: 1.0
-  rollout_weight: 1.5          # stronger rollout signal (1.0 → 1.5)
-  rollout_train_horizon: 50    # longer training horizon (15 → 50)
-  rollout_horizon_start: 5     # curriculum: start from 5 steps
-  rollout_curriculum_steps: 1500  # grow to 50 over first 1500 updates
+  one_step_weight: 0.5         # 降低单步权重，单步已经够好了
+  rollout_weight: 3.0          # 大幅提升 rollout 权重，强迫解决累积误差
+  rollout_train_horizon: 150   # 从 50 增大到 150，覆盖更长 horizon
+  rollout_horizon_start: 10
+  rollout_curriculum_steps: 2000
 
 eval:
   warmup_steps: 10
