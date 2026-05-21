@@ -1,31 +1,25 @@
-"""Student world model — improved GRU + residual MLP with LayerNorm.
+"""Student world model — GRU + deep residual MLP, with EnsembleModel wrapper.
 
-Architecture:
-  Input projection  : Linear(obs_dim + act_dim → hidden_dim)
-  Residual blocks   : N × (LayerNorm → Linear → SiLU → Linear) + skip
-  GRU cell          : optional, wraps the encoded feature for temporal memory
-  Output head       : Linear(hidden_dim → obs_dim) + tanh clamp
+EnsembleModel wraps N independently-trained StudentWorldModel instances.
+At inference, it averages the predicted delta across all members, which
+reduces variance and prevents individual model failures from dominating.
 
-The public interface (initial_hidden / forward) is unchanged so all locked
-tests, checkpoint utilities, and eval scripts remain compatible.
+The public interface (initial_hidden / forward) is identical for both
+StudentWorldModel and EnsembleModel, so official_rollout.py works unchanged.
 """
 
 from __future__ import annotations
-
 import torch
 from torch import nn
 
 
 class _ResBlock(nn.Module):
-    """Pre-norm residual block: LayerNorm → Linear → SiLU → Linear → add."""
-
     def __init__(self, dim: int) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        self.fc1 = nn.Linear(dim, dim * 2)
-        self.act = nn.SiLU()
-        self.fc2 = nn.Linear(dim * 2, dim)
-        # zero-init last layer so residual starts as identity
+        self.fc1  = nn.Linear(dim, dim * 2)
+        self.act  = nn.SiLU()
+        self.fc2  = nn.Linear(dim * 2, dim)
         nn.init.zeros_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
 
@@ -34,87 +28,90 @@ class _ResBlock(nn.Module):
 
 
 class StudentWorldModel(nn.Module):
-    """GRU-enhanced residual world model for InvertedPendulum-v5.
-
-    Args:
-        obs_dim:     Observation dimension (locked at 4).
-        act_dim:     Action dimension (locked at 1).
-        hidden_dim:  Width of all hidden layers.
-        num_layers:  Number of residual blocks before the GRU.
-        use_gru:     If True, adds a GRUCell for temporal memory.
-        delta_limit: tanh output is scaled to [-delta_limit, delta_limit].
-    """
+    """GRU + deep residual MLP world model."""
 
     def __init__(
         self,
-        obs_dim: int = 4,
-        act_dim: int = 1,
-        hidden_dim: int = 256,
-        num_layers: int = 3,
-        use_gru: bool = True,
+        obs_dim:     int   = 4,
+        act_dim:     int   = 1,
+        hidden_dim:  int   = 256,
+        num_layers:  int   = 3,
+        use_gru:     bool  = True,
         delta_limit: float = 3.0,
-    ):
+    ) -> None:
         super().__init__()
-        self.use_gru = bool(use_gru)
+        self.use_gru     = bool(use_gru)
         self.delta_limit = float(delta_limit)
         self._hidden_dim = int(hidden_dim)
 
-        # Project concatenated (obs, act) into hidden space
         self.input_proj = nn.Sequential(
             nn.Linear(obs_dim + act_dim, hidden_dim),
             nn.SiLU(),
         )
-
-        # Stack of pre-norm residual blocks
         self.res_blocks = nn.ModuleList(
             [_ResBlock(hidden_dim) for _ in range(int(num_layers))]
         )
-
-        # Optional GRU for temporal context
-        self.gru = nn.GRUCell(hidden_dim, hidden_dim) if self.use_gru else None
-
-        # Output LayerNorm before head for training stability
+        self.gru      = nn.GRUCell(hidden_dim, hidden_dim) if self.use_gru else None
         self.out_norm = nn.LayerNorm(hidden_dim)
-        self.head = nn.Linear(hidden_dim, obs_dim)
-
-    # ------------------------------------------------------------------
-    # Locked public interface
-    # ------------------------------------------------------------------
+        self.head     = nn.Linear(hidden_dim, obs_dim)
 
     def initial_hidden(self, batch_size: int, device: torch.device):
-        """Return zero GRU state, or None when use_gru=False."""
         if not self.use_gru:
             return None
         return torch.zeros(batch_size, self._hidden_dim, device=device)
 
-    def forward(
-        self,
-        obs_norm: torch.Tensor,
-        act_norm: torch.Tensor,
-        hidden=None,
-    ):
-        """Predict normalised delta and update hidden state.
-
-        Args:
-            obs_norm: (B, obs_dim) normalised observation.
-            act_norm: (B, act_dim) normalised action.
-            hidden:   GRU hidden state tensor or None.
-
-        Returns:
-            delta_norm: (B, obs_dim) predicted normalised delta.
-            hidden:     Updated hidden state (None if use_gru=False).
-        """
+    def forward(self, obs_norm, act_norm, hidden=None):
         x = self.input_proj(torch.cat([obs_norm, act_norm], dim=-1))
-
         for block in self.res_blocks:
             x = block(x)
-
         if self.gru is not None:
             if hidden is None:
                 hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
             hidden = self.gru(x, hidden)
             x = hidden
-
-        raw_delta = self.head(self.out_norm(x))
-        delta = self.delta_limit * torch.tanh(raw_delta / self.delta_limit)
+        raw   = self.head(self.out_norm(x))
+        delta = self.delta_limit * torch.tanh(raw / self.delta_limit)
         return delta, hidden
+
+
+class EnsembleModel:
+    """Wraps N StudentWorldModel instances; averages their delta predictions.
+
+    Satisfies the same interface as StudentWorldModel so it can be passed
+    directly to official_open_loop_rollout and predict_next without any
+    changes to locked files.
+
+    hidden = list of per-member hidden states, one per member model.
+    """
+
+    def __init__(self, members: list[StudentWorldModel]) -> None:
+        assert len(members) > 0
+        self.members = members
+
+    def initial_hidden(self, batch_size: int, device: torch.device):
+        return [m.initial_hidden(batch_size, device) for m in self.members]
+
+    def eval(self):
+        for m in self.members:
+            m.eval()
+        return self
+
+    def train(self, mode: bool = True):
+        for m in self.members:
+            m.train(mode)
+        return self
+
+    def __call__(self, obs_norm, act_norm, hidden=None):
+        if hidden is None:
+            hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
+
+        deltas     = []
+        new_hidden = []
+        for i, member in enumerate(self.members):
+            d, h = member(obs_norm, act_norm, hidden[i])
+            deltas.append(d)
+            new_hidden.append(h)
+
+        # average delta across ensemble members
+        delta_mean = torch.stack(deltas, dim=0).mean(dim=0)
+        return delta_mean, new_hidden
