@@ -11,12 +11,12 @@ training:
   batch_size: 128
   updates: 6000
   smoke_updates: 120
-  train_sequence_length: 130
+  train_sequence_length: 170
   learning_rate: 2.0e-6
   grad_clip_norm: 1.0
   eval_every: 500
   smoke_eval_every: 20
-  val_horizon: 500
+  val_horizon: 800
   max_val_windows: 128
   checkpoint_metric: val/VPT80@0.25
   checkpoint_mode: max
